@@ -1,40 +1,30 @@
 import asyncio
+import json
 import logging
 import os
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, List
 
 from openai import AsyncOpenAI
-from openai.types.beta.threads import Run
+from serpapi import GoogleSearch
 
 from models import ChatMessage
 from vector_store import VectorStore
 
-# Configure logging for the OpenAIAgent module
+# Configure logging
 logger = logging.getLogger(__name__)
 
 
 class OpenAIAgent:
-    """
-    A class that interfaces with OpenAI's Assistant API to generate responses,
-    handle streaming, and create visualizations.
-
-    This agent integrates with a vector store for knowledge retrieval and supports
-    web searching capabilities.
-    """
-
     def __init__(self, vector_store: VectorStore):
         """
         Initialize the OpenAI agent with a vector store.
-
-        Args:
-            vector_store (VectorStore): The vector store to use for document retrieval.
         """
-        # Initialize OpenAI client using API key from environment variables
-        self.client: AsyncOpenAI = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.vector_store: VectorStore = vector_store
+        self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.vector_store = vector_store
+        self.serpapi_key = os.getenv("SERPAPI_API_KEY")
 
-        # Default assistant instruction template with placeholders for additional instructions
-        self.instructions_template: str = """
+        # Default assistant instruction template
+        self.instructions_template = """
         You are a helpful AI assistant with the following capabilities:
         1. Access to a knowledge base through vector stores
         2. Ability to search the web for current information
@@ -49,54 +39,146 @@ class OpenAIAgent:
         """
 
         # Cache for assistants to avoid recreating them
-        # Key: cache_key (string based on tools and vector stores)
-        # Value: assistant_id (string)
-        self.assistant_cache: Dict[str, str] = {}
+        self.assistant_cache = {}
+
+    async def perform_web_search(self, query: str) -> str:
+        """
+        Perform a web search using SerpAPI.
+        """
+        try:
+            if not self.serpapi_key:
+                logger.error("SERPAPI_API_KEY not set")
+                return "Web search is not available (API key not configured)."
+
+            logger.info(f"Searching web for: {query}")
+
+            # Use SerpAPI to search the web
+            params = {
+                "engine": "google",
+                "q": query,
+                "api_key": self.serpapi_key,
+                "num": 5,
+            }
+
+            search = GoogleSearch(params)
+            results = search.get_dict()
+
+            # Extract organic results
+            organic_results = results.get("organic_results", [])
+
+            if not organic_results:
+                return "No relevant results found on the web."
+
+            # Format the results
+            formatted_results = "Here are some relevant results from the web:\n\n"
+
+            for i, result in enumerate(organic_results[:5]):
+                title = result.get("title", "No title")
+                link = result.get("link", "No link")
+                snippet = result.get("snippet", "No description")
+
+                formatted_results += f"{i+1}. **{title}**\n"
+                formatted_results += f"   {snippet}\n"
+                formatted_results += f"   Source: {link}\n\n"
+
+            return formatted_results
+
+        except Exception as e:
+            logger.error(f"Error searching web: {str(e)}")
+            return f"I encountered an error while searching the web: {str(e)}"
+
+    async def handle_tool_calls(self, thread_id: str, run_id: str):
+        """
+        Handle tool calls from the assistant, particularly for web search.
+        """
+        try:
+            # Wait for any required actions
+            run_status = await self.client.beta.threads.runs.retrieve(
+                thread_id=thread_id, run_id=run_id
+            )
+
+            if run_status.status == "requires_action":
+                tool_outputs = []
+
+                # Process each required action
+                for (
+                    tool_call
+                ) in run_status.required_action.submit_tool_outputs.tool_calls:
+                    if tool_call.function.name == "search_web":
+                        # Extract the query from the function arguments
+                        arguments = json.loads(tool_call.function.arguments)
+                        query = arguments.get("query", "")
+
+                        # Perform the web search
+                        search_results = await self.perform_web_search(query)
+
+                        # Add the results to tool outputs
+                        tool_outputs.append(
+                            {"tool_call_id": tool_call.id, "output": search_results}
+                        )
+
+                # Submit the tool outputs back to the assistant
+                await self.client.beta.threads.runs.submit_tool_outputs(
+                    thread_id=thread_id, run_id=run_id, tool_outputs=tool_outputs
+                )
+
+                return True  # Indicate that tool calls were handled
+
+            return False  # No tool calls to handle
+
+        except Exception as e:
+            logger.error(f"Error handling tool calls: {str(e)}")
+            return False
 
     async def generate_response(
         self, messages: List[ChatMessage], search_web: bool = False
     ) -> str:
         """
         Generate a response from the OpenAI agent using Assistants API.
-
-        This method creates or retrieves an assistant from cache, creates a thread,
-        and processes the response including handling citations and annotations.
-
-        Args:
-            messages (List[ChatMessage]): List of messages in the conversation.
-            search_web (bool, optional): Whether to enable web search. Defaults to False.
-
-        Returns:
-            str: The generated response text.
-
-        Raises:
-            Exception: If there's an error generating the response.
         """
         try:
-            # Get all available vector store IDs from the connected vector store
-            vector_store_ids: List[str] = self.vector_store.get_vector_store_ids()
+            # Get all available vector store IDs
+            vector_store_ids = self.vector_store.get_vector_store_ids()
 
-            # Configure tools based on requested capabilities
-            tools: List[Dict[str, str]] = [{"type": "file_search"}]
+            # Configure tools
+            tools = [{"type": "file_search"}]
+
+            # Add web search function if requested
             if search_web:
-                tools.append({"type": "web_search"})
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "description": "Search the web for current and factual information",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query to look up on the web",
+                                    }
+                                },
+                                "required": ["query"],
+                            },
+                        },
+                    }
+                )
 
-            # Generate a cache key based on enabled tools and available vector stores
-            # This allows reuse of assistants with the same configuration
-            cache_key: str = (
-                f"{'-'.join(t['type'] for t in tools)}-{'-'.join(vector_store_ids)}"
+            # Generate a cache key based on tools and vector store IDs
+            cache_key = (
+                f"{'-'.join(t.get('type') for t in tools)}-{'-'.join(vector_store_ids)}"
             )
 
-            # Check if we have a cached assistant with this configuration
-            assistant_id: Optional[str] = self.assistant_cache.get(cache_key)
+            # Check if we have a cached assistant
+            assistant_id = self.assistant_cache.get(cache_key)
 
-            # If no cached assistant exists, create a new one
             if not assistant_id:
-                # Create a new assistant with the specified tools and vector stores
+                # Create a new assistant
                 assistant = await self.client.beta.assistants.create(
                     name="Knowledgebase Assistant",
                     instructions=self.instructions_template.format(
-                        additional_instructions=""
+                        additional_instructions="When you need current information, use the search_web function."
                     ),
                     tools=tools,
                     model="gpt-4o",
@@ -106,12 +188,11 @@ class OpenAIAgent:
                         else None
                     ),
                 )
-                # Cache the assistant ID for future reuse
+                # Cache the assistant ID
                 self.assistant_cache[cache_key] = assistant.id
                 assistant_id = assistant.id
 
-            # Create a thread with all the messages from the conversation
-            # Filter to include only user and assistant messages
+            # Create a thread with all the messages
             thread = await self.client.beta.threads.create(
                 messages=[
                     {"role": msg.role, "content": msg.content}
@@ -120,50 +201,49 @@ class OpenAIAgent:
                 ]
             )
 
-            # Run the assistant on the thread
-            run: Run = await self.client.beta.threads.runs.create(
+            # Run the assistant
+            run = await self.client.beta.threads.runs.create(
                 thread_id=thread.id, assistant_id=assistant_id
             )
 
-            # Poll for completion with a timeout
-            max_retries: int = 60  # 5 minutes with 5-second intervals
-            retries: int = 0
+            # Poll for completion or required actions
+            max_retries = 60  # 5 minutes with 5-second intervals
+            retries = 0
 
-            # Wait for the run to complete, checking status periodically
             while retries < max_retries:
-                run_status: Run = await self.client.beta.threads.runs.retrieve(
+                run_status = await self.client.beta.threads.runs.retrieve(
                     thread_id=thread.id, run_id=run.id
                 )
 
                 if run_status.status == "completed":
                     break
+                elif run_status.status == "requires_action":
+                    # Handle any required actions (like web search)
+                    handled = await self.handle_tool_calls(thread.id, run.id)
+                    if handled:
+                        logger.info("Successfully handled tool calls")
                 elif run_status.status in ["failed", "cancelled", "expired"]:
                     logger.error(f"Run failed with status: {run_status.status}")
                     if hasattr(run_status, "last_error") and run_status.last_error:
                         logger.error(f"Error details: {run_status.last_error}")
                     return f"I encountered an error: {run_status.status}"
 
-                # Wait before checking again
                 await asyncio.sleep(5)
                 retries += 1
 
-            # Handle timeout case
             if retries >= max_retries:
                 return "The request timed out. Please try again later."
 
-            # Get the assistant's response (most recent message)
+            # Get the assistant's response
             messages_response = await self.client.beta.threads.messages.list(
                 thread_id=thread.id, order="desc", limit=1
             )
 
-            # Check if we received any messages
             if not messages_response.data:
                 return "No response was generated."
 
-            # Extract and process the text content
-            response_text: str = ""
-
-            # Process each content block in the message
+            # Extract the text content
+            response_text = ""
             for content in messages_response.data[0].content:
                 if content.type == "text":
                     response_text += content.text.value
@@ -175,9 +255,8 @@ class OpenAIAgent:
                     ):
                         # Replace annotations with formatted citations
                         annotations = content.text.annotations
-                        citations: List[str] = []
+                        citations = []
 
-                        # Process each annotation
                         for i, annotation in enumerate(annotations):
                             # Replace the annotation text with a reference number
                             response_text = response_text.replace(
@@ -186,9 +265,9 @@ class OpenAIAgent:
 
                             # Build citation based on annotation type
                             if hasattr(annotation, "file_citation"):
-                                file_id: str = annotation.file_citation.file_id
+                                file_id = annotation.file_citation.file_id
                                 # Get file metadata if available
-                                file_info: Dict[str, Any] = next(
+                                file_info = next(
                                     (
                                         doc
                                         for doc in self.vector_store.list_documents()
@@ -215,33 +294,41 @@ class OpenAIAgent:
     ) -> AsyncGenerator[str, None]:
         """
         Generate a streaming response from the OpenAI agent using Assistants API.
-
-        This method creates a new assistant for each streaming session,
-        sends the response in chunks as they become available, and cleans up
-        after the stream is complete.
-
-        Args:
-            messages (List[ChatMessage]): List of messages in the conversation.
-            search_web (bool, optional): Whether to enable web search. Defaults to False.
-
-        Yields:
-            str: Chunks of the generated response as they become available.
         """
         try:
             # Get all available vector store IDs
-            vector_store_ids: List[str] = self.vector_store.get_vector_store_ids()
+            vector_store_ids = self.vector_store.get_vector_store_ids()
 
-            # Configure tools based on requested capabilities
-            tools: List[Dict[str, str]] = [{"type": "file_search"}]
+            # Configure tools
+            tools = [{"type": "file_search"}]
+
+            # Add web search if requested
             if search_web:
-                tools.append({"type": "web_search"})
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "description": "Search the web for current and factual information",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query to look up on the web",
+                                    }
+                                },
+                                "required": ["query"],
+                            },
+                        },
+                    }
+                )
 
             # Create a new assistant for this streaming session
-            # Note: We don't cache streaming assistants to ensure fresh responses
             assistant = await self.client.beta.assistants.create(
                 name="Streaming Assistant",
                 instructions=self.instructions_template.format(
-                    additional_instructions=""
+                    additional_instructions="When you need current information, use the search_web function."
                 ),
                 tools=tools,
                 model="gpt-4o",
@@ -252,7 +339,7 @@ class OpenAIAgent:
                 ),
             )
 
-            # Create a thread with all the messages from the conversation
+            # Create a thread with all the messages
             thread = await self.client.beta.threads.create(
                 messages=[
                     {"role": msg.role, "content": msg.content}
@@ -267,11 +354,24 @@ class OpenAIAgent:
             )
 
             # Process the streaming response
-            buffer: str = ""
+            buffer = ""
 
-            # Iterate through chunks as they arrive
             async for chunk in run:
-                if chunk.event == "thread.message.delta" and hasattr(
+                # Handle tool calls if needed
+                if chunk.event == "thread.run.requires_action":
+                    # Pause streaming to handle tool calls
+                    yield "\n[Searching the web...]\n"
+
+                    # Get the full run to handle tool calls
+                    run_status = await self.client.beta.threads.runs.retrieve(
+                        thread_id=thread.id, run_id=run.id
+                    )
+
+                    # Handle the tool calls
+                    await self.handle_tool_calls(thread.id, run.id)
+
+                # Continue with normal message streaming
+                elif chunk.event == "thread.message.delta" and hasattr(
                     chunk.data, "delta"
                 ):
                     if (
@@ -283,12 +383,11 @@ class OpenAIAgent:
                                 content_delta, "text"
                             ):
                                 if hasattr(content_delta.text, "value"):
-                                    text_value: str = content_delta.text.value
+                                    text_value = content_delta.text.value
                                     buffer += text_value
                                     yield text_value
 
             # Clean up the assistant after streaming is complete
-            # This prevents accumulating unused assistants
             try:
                 await self.client.beta.assistants.delete(assistant_id=assistant.id)
             except Exception as delete_error:
@@ -301,19 +400,10 @@ class OpenAIAgent:
     async def create_visualization(self, prompt: str) -> str:
         """
         Create a visualization using Canvas via Assistant.
-
-        This method creates a specialized visualization assistant with the DALL-E tool,
-        processes the request, and returns the generated visualization.
-
-        Args:
-            prompt (str): The description of the visualization to create.
-
-        Returns:
-            str: Markdown text containing the visualization image URL and any accompanying text.
         """
         try:
-            # Create a specialized assistant with Canvas tool (DALL-E)
-            visualization_assistant = await self.client.beta.assistants.create(
+            # Create a specialized assistant with Canvas tool
+            assistant = await self.client.beta.assistants.create(
                 name="Visualization Assistant",
                 instructions=f"Create a clear visualization based on this request: {prompt}",
                 tools=[{"type": "file_search"}, {"type": "dalle"}],
@@ -330,7 +420,7 @@ class OpenAIAgent:
             )
 
             # Create a thread with the visualization request
-            visualization_thread = await self.client.beta.threads.create(
+            thread = await self.client.beta.threads.create(
                 messages=[
                     {
                         "role": "user",
@@ -340,19 +430,17 @@ class OpenAIAgent:
             )
 
             # Run the assistant
-            visualization_run: Run = await self.client.beta.threads.runs.create(
-                thread_id=visualization_thread.id,
-                assistant_id=visualization_assistant.id,
+            run = await self.client.beta.threads.runs.create(
+                thread_id=thread.id, assistant_id=assistant.id
             )
 
-            # Poll for completion with a timeout
-            max_retries: int = 30
-            retries: int = 0
+            # Poll for completion
+            max_retries = 30
+            retries = 0
 
-            # Wait for the visualization to complete
             while retries < max_retries:
-                run_status: Run = await self.client.beta.threads.runs.retrieve(
-                    thread_id=visualization_thread.id, run_id=visualization_run.id
+                run_status = await self.client.beta.threads.runs.retrieve(
+                    thread_id=thread.id, run_id=run.id
                 )
 
                 if run_status.status == "completed":
@@ -361,36 +449,28 @@ class OpenAIAgent:
                     logger.error(
                         f"Visualization run failed with status: {run_status.status}"
                     )
-                    # Clean up the assistant on failure
-                    await self.client.beta.assistants.delete(
-                        assistant_id=visualization_assistant.id
-                    )
+                    await self.client.beta.assistants.delete(assistant_id=assistant.id)
                     return f"I encountered an error creating the visualization: {run_status.status}"
 
-                # Wait before checking again
                 await asyncio.sleep(3)
                 retries += 1
 
-            # Get the visualization result from the most recent message
+            # Get the visualization result
             messages = await self.client.beta.threads.messages.list(
-                thread_id=visualization_thread.id, order="desc", limit=1
+                thread_id=thread.id, order="desc", limit=1
             )
 
-            # Process the content to extract images and text
-            result: str = ""
+            result = ""
             for message in messages.data:
                 for content in message.content:
                     if content.type == "image":
-                        # Return image URL as markdown if available
+                        # Return image URL if available
                         result += f"![Visualization]({content.image.file_id})\n\n"
                     elif content.type == "text":
-                        # Add any explanatory text
                         result += content.text.value + "\n\n"
 
             # Clean up the assistant
-            await self.client.beta.assistants.delete(
-                assistant_id=visualization_assistant.id
-            )
+            await self.client.beta.assistants.delete(assistant_id=assistant.id)
 
             return result
         except Exception as e:
