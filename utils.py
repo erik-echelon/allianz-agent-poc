@@ -1,10 +1,11 @@
 import io
-import os
-from typing import Dict, Any, List, Optional, Tuple, Union, Callable
 import logging
-from pypdf import PdfReader
+import os
+from typing import Any, Dict, List
+
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from pypdf import PdfReader
 
 from vector_store import VectorStore
 

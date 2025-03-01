@@ -1,10 +1,10 @@
-import os
-import logging
 import asyncio
-from typing import List, Dict, Any, AsyncGenerator, Optional, Union, Tuple, Set
+import logging
+import os
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
 from openai import AsyncOpenAI
-from openai.types.beta.threads import Run, ThreadMessage
-from openai.types.beta.assistants import Assistant
+from openai.types.beta.threads import Run
 
 from models import ChatMessage
 from vector_store import VectorStore
@@ -93,7 +93,7 @@ class OpenAIAgent:
             # If no cached assistant exists, create a new one
             if not assistant_id:
                 # Create a new assistant with the specified tools and vector stores
-                assistant: Assistant = await self.client.beta.assistants.create(
+                assistant = await self.client.beta.assistants.create(
                     name="Knowledgebase Assistant",
                     instructions=self.instructions_template.format(
                         additional_instructions=""
@@ -238,7 +238,7 @@ class OpenAIAgent:
 
             # Create a new assistant for this streaming session
             # Note: We don't cache streaming assistants to ensure fresh responses
-            assistant: Assistant = await self.client.beta.assistants.create(
+            assistant = await self.client.beta.assistants.create(
                 name="Streaming Assistant",
                 instructions=self.instructions_template.format(
                     additional_instructions=""
@@ -313,22 +313,20 @@ class OpenAIAgent:
         """
         try:
             # Create a specialized assistant with Canvas tool (DALL-E)
-            visualization_assistant: Assistant = (
-                await self.client.beta.assistants.create(
-                    name="Visualization Assistant",
-                    instructions=f"Create a clear visualization based on this request: {prompt}",
-                    tools=[{"type": "file_search"}, {"type": "dalle"}],
-                    model="gpt-4o",
-                    tool_resources=(
-                        {
-                            "file_search": {
-                                "vector_store_ids": self.vector_store.get_vector_store_ids()
-                            }
+            visualization_assistant = await self.client.beta.assistants.create(
+                name="Visualization Assistant",
+                instructions=f"Create a clear visualization based on this request: {prompt}",
+                tools=[{"type": "file_search"}, {"type": "dalle"}],
+                model="gpt-4o",
+                tool_resources=(
+                    {
+                        "file_search": {
+                            "vector_store_ids": self.vector_store.get_vector_store_ids()
                         }
-                        if self.vector_store.get_vector_store_ids()
-                        else None
-                    ),
-                )
+                    }
+                    if self.vector_store.get_vector_store_ids()
+                    else None
+                ),
             )
 
             # Create a thread with the visualization request

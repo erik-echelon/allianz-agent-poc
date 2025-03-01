@@ -1,15 +1,13 @@
+import asyncio
+import logging
 import os
 import pickle
-from typing import List, Dict, Any, Optional, Tuple, Set, Union, cast
-from datetime import datetime
-import logging
 import uuid
-import asyncio
-from openai import AsyncOpenAI
-from openai.types.beta.vector_stores import VectorStore as OpenAIVectorStore
-from openai.types.beta.vector_stores.file_batches import FileBatch
-from openai.types.file_object import FileObject
+from datetime import datetime
+from typing import Any, Dict, List, Optional, cast
+
 from langchain.schema import Document
+from openai import AsyncOpenAI
 
 # Configure logging for the vector store module
 logger = logging.getLogger(__name__)
@@ -154,11 +152,9 @@ class VectorStore:
                 vector_store_name: str = f"vs_{uuid.uuid4().hex[:8]}"
 
                 # Create vector store with 30-day expiration after last activity
-                vector_store: OpenAIVectorStore = (
-                    await self.client.beta.vector_stores.create(
-                        name=vector_store_name,
-                        expires_after={"anchor": "last_active_at", "days": 30},
-                    )
+                vector_store = await self.client.beta.vector_stores.create(
+                    name=vector_store_name,
+                    expires_after={"anchor": "last_active_at", "days": 30},
                 )
                 vector_store_id: str = vector_store.id
 
@@ -234,7 +230,7 @@ class VectorStore:
 
             # Upload temporary file to OpenAI
             with open(temp_filepath, "rb") as f:
-                file_response: FileObject = await self.client.files.create(
+                file_response = await self.client.files.create(
                     file=f, purpose="assistants"
                 )
 
@@ -250,10 +246,8 @@ class VectorStore:
             try:
                 # Create file batch and poll until complete
                 with open(temp_filepath, "rb") as f:
-                    file_batch: FileBatch = (
-                        await self.client.beta.vector_stores.file_batches.upload_and_poll(
-                            vector_store_id=vector_store_id, files=[f]
-                        )
+                    file_batch = await self.client.beta.vector_stores.file_batches.upload_and_poll(
+                        vector_store_id=vector_store_id, files=[f]
                     )
 
                 # Check file batch status
@@ -287,7 +281,7 @@ class VectorStore:
                     logger.info("Trying alternate approach with file IDs...")
 
                     # Create file batch using the file ID we obtained earlier
-                    file_batch: FileBatch = (
+                    file_batch = (
                         await self.client.beta.vector_stores.file_batches.create(
                             vector_store_id=vector_store_id, file_ids=[file_id]
                         )
@@ -299,7 +293,7 @@ class VectorStore:
 
                     while attempts < max_attempts:
                         # Check batch status
-                        batch_status: FileBatch = (
+                        batch_status = (
                             await self.client.beta.vector_stores.file_batches.retrieve(
                                 vector_store_id=vector_store_id,
                                 file_batch_id=file_batch.id,
@@ -483,10 +477,8 @@ class VectorStore:
             for name, vs_id in self.vector_stores.items():
                 try:
                     # Retrieve vector store information from OpenAI
-                    vector_store: OpenAIVectorStore = (
-                        await self.client.beta.vector_stores.retrieve(
-                            vector_store_id=vs_id
-                        )
+                    vector_store = await self.client.beta.vector_stores.retrieve(
+                        vector_store_id=vs_id
                     )
 
                     # Extract relevant information

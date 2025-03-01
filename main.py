@@ -1,28 +1,20 @@
-import os
 import json
+import logging
+import os
 import uuid
-from typing import List, Dict, Any, Optional, AsyncGenerator, Iterator, Union
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    UploadFile,
-    File,
-    Form,
-    BackgroundTasks,
-    WebSocket,
-    WebSocketDisconnect,
-)
+from typing import Any, Dict, List, Optional
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import (BackgroundTasks, FastAPI, File, Form, HTTPException,
+                     UploadFile, WebSocket, WebSocketDisconnect)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import asyncio
-import uvicorn
-import logging
-from dotenv import load_dotenv
 
-from models import ChatMessage, ChatRequest, DocumentResponse
 from agent import OpenAIAgent
+from models import ChatMessage, ChatRequest, DocumentResponse
+from utils import get_file_extension, process_file
 from vector_store import VectorStore
-from utils import process_file, get_file_extension
 
 # Load environment variables from .env file
 load_dotenv()
